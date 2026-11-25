@@ -1,0 +1,131 @@
+name: Build fs2es-indexer
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 8 * * *'
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: fs2es-indexer-build
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/k29t59dh/fs2es-indexer-docker
+  UPSTREAM: https://github.com/Ellerhold/fs2es-indexer.git
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout packaging repository
+        uses: actions/checkout@v4
+
+      - name: Discover latest stable upstream version
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION=$(git ls-remote --tags --refs "$UPSTREAM" |
+            awk '{print $2}' |
+            sed 's|refs/tags/||' |
+            grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' |
+            sort -V |
+            tail -1)
+
+          test -n "$VERSION"
+
+          if [ "$(printf '%s\n' 0.12.6 "$VERSION" |
+            sort -V | head -1)" != "0.12.6" ]; then
+            echo "Refusing to publish pre-license release."
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Latest stable upstream version: $VERSION"
+
+      - name: Log in to GitHub Container Registry
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin
+
+      - name: Check whether image already exists
+        id: existing
+        env:
+          VERSION: ${{ steps.upstream.outputs.version }}
+        run: |
+          if docker manifest inspect "$IMAGE:$VERSION" \
+            >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Version $VERSION is already published."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download upstream source
+        if: steps.existing.outputs.exists == 'false'
+        id: source
+        env:
+          VERSION: ${{ steps.upstream.outputs.version }}
+        run: |
+          git clone --depth 1 --branch "$VERSION" \
+            "$UPSTREAM" source
+
+          test -s source/LICENSE
+
+          REVISION=$(git -C source rev-parse HEAD)
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+
+          rm -rf source/.git
+
+      - name: Build Docker image
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.upstream.outputs.version }}
+          REVISION: ${{ steps.source.outputs.revision }}
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            --build-arg UPSTREAM_VERSION="$VERSION" \
+            --build-arg UPSTREAM_REVISION="$REVISION" \
+            -t "$IMAGE:$VERSION" \
+            .
+
+      - name: Smoke test
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.upstream.outputs.version }}
+        run: |
+          docker run --rm "$IMAGE:$VERSION" --help
+
+          docker run --rm \
+            --entrypoint python \
+            "$IMAGE:$VERSION" \
+            -c "import yaml; import elasticsearch; from lib.Fs2EsIndexer import Fs2EsIndexer"
+
+          docker run --rm \
+            --entrypoint /bin/sh \
+            "$IMAGE:$VERSION" \
+            -c 'test -s /usr/src/fs2es-indexer/LICENSE'
+
+      - name: Publish versioned image
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.upstream.outputs.version }}
+        run: |
+          docker push "$IMAGE:$VERSION"
+
+      - name: Publish latest tag
+        env:
+          VERSION: ${{ steps.upstream.outputs.version }}
+        run: |
+          docker pull "$IMAGE:$VERSION"
+          docker tag "$IMAGE:$VERSION" "$IMAGE:latest"
+          docker push "$IMAGE:latest"
