@@ -2,6 +2,12 @@ name: Build fs2es-indexer
 
 on:
   workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Rebuild even if the upstream version already exists'
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: '23 8 * * *'
 
@@ -60,8 +66,12 @@ jobs:
         id: existing
         env:
           VERSION: ${{ steps.upstream.outputs.version }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild }}
         run: |
-          if docker manifest inspect "$IMAGE:$VERSION" \
+          if [ "$FORCE_REBUILD" = "true" ]; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Forced rebuild requested for version $VERSION."
+          elif docker manifest inspect "$IMAGE:$VERSION" \
             >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "Version $VERSION is already published."
@@ -109,6 +119,23 @@ jobs:
             --entrypoint python \
             "$IMAGE:$VERSION" \
             -c "import yaml; import elasticsearch; from lib.Fs2EsIndexer import Fs2EsIndexer"
+
+          docker run --rm \
+            --entrypoint python \
+            "$IMAGE:$VERSION" \
+            -c '
+          import pyfanotify as fan
+          from importlib.metadata import version
+
+          assert version("pyfanotify") == "0.3.0"
+          assert fan.FAN_CREATE
+          assert fan.FAN_DELETE
+          assert fan.FAN_MOVED_FROM
+          assert fan.FAN_MOVED_TO
+          assert fan.FAN_ONDIR
+
+          print("pyfanotify smoke test passed")
+          '
 
           docker run --rm \
             --entrypoint /bin/sh \
