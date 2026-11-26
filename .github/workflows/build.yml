@@ -29,7 +29,7 @@ jobs:
 
     steps:
       - name: Checkout packaging repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Discover latest stable upstream version
         id: upstream
